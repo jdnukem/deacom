@@ -1,0 +1,341 @@
+#!/usr/bin/env bash
+
+
+# $1 = motif file
+# $2 = ChIPseq file
+# $3 = DNase-seq file
+# $4 = genome
+# $5 = working directory (Directory to create folder in, not folder itself)
+# $6 = tf name (to make files with)
+
+# Make some easier names to reference variables
+motif_file=""
+chip_file=""
+dnase_file=""
+genome_name=""
+working_dir=""
+tf_name=""
+perform_blacklist=0
+
+usage=""
+
+while getopts ":hbm:c:d:g:w:t:" opt; do
+    case $opt in
+        h)
+            printf "\n$usage"
+            ;;
+        m)
+            printf "\n-Motif file to use: $OPTARG\n"
+            motif_file=${OPTARG}
+            ;;
+        c)
+            printf "\n-ChIPseq file to use: $OPTARG\n"
+            chip_file=${OPTARG}
+            ;;
+        d)
+            printf "\n-DNase file to use: $OPTARG\n"
+            dnase_file=${OPTARG}
+            ;;
+        g)
+            printf "\n-Genome name to use: $OPTARG\n"
+            genome_name=${OPTARG}
+            ;;
+        w)
+            printf "\n-DNase file to use: $OPTARG\n"
+            working_dir=${OPTARG%*/}
+            ;;
+        t)
+            printf "\n-Transcription Factor name to use: $OPTARG\n"
+            tf_name=${OPTARG}
+            ;;
+        b)
+            printf "\n-Performing blacklist filtering\n"
+            perform_blacklist=1
+            ;;
+        \?)
+            printf "\nError: Invalid option: -$OPTARG. \n$usage"
+            exit 1
+            ;;
+        :)
+            printf "\nError: Option -$OPTARG requires an argument.\n"
+            exit 1
+            ;;
+    esac
+done
+shift $((OPTIND-1))
+
+if [[ $motif_file == "" ]]; then
+    printf "Error: Missing motif file\n"
+    exit 1;
+fi
+if [[ $chip_file == "" ]]; then
+    printf "Error: Missing ChIPseq file\n"
+    exit 1;
+fi
+if [[ $dnase_file == "" ]]; then
+    printf "Error: Missing DNase-seq file\n"
+    exit 1;
+fi
+if [[ $genome_name == "" ]]; then
+    printf "Error: Missing genome name\n"
+    exit 1;
+fi
+if [[ $genome_name != "mm9" && $genome_name != "hg38" && $genome_name != "mm10" && $genome_name != "hg19" ]]; then
+    printf "Error: Genome name is invalid. Available options are mm9, mm10, hg19, hg38\n"
+    exit 1
+fi
+if [[ $working_dir == "" ]]; then
+    printf "Error: Missing output directory\n"
+    exit 1;
+fi
+if [[ $tf_name == "" ]]; then
+    printf "Error: Missing transcription factor name\n"
+    exit 1;
+fi
+
+
+# Activate the needed environment
+source /home/jd/footprint/bin/activate
+
+# Working Directory (Make dir if not already there)
+mkdir -p "${working_dir}/${tf_name}"
+cd "${working_dir}/${tf_name}"
+
+# genome
+if [[ $genome_name == "hg38" ]]; then
+    genome_fa="/home/segil_lab/genomes/Gencode_hg38/GRCh38.primary_assembly.genome.fa"
+    genome_fai="/home/segil_lab/genomes/Gencode_hg38/GRCh38.primary_assembly.genome.fa.fai"
+    chrom_sizes="/media/segil_lab/SegilRaid/staging/Duc/motifs_defcom/hg38.chrom.sizes"
+    blacklist="/home/segil_lab/genomes/Gencode_hg38/hg38.blacklist.bed"
+elif [[ $genome_name == "mm9" ]]; then
+    genome_fa="/media/segil_lab/SegilRaid/Data_Processing/mm9/mm9/mm9.fa"
+    genome_fai="/media/segil_lab/SegilRaid/Data_Processing/mm9/mm9/mm9.fa.fai"
+    chrom_sizes="/media/segil_lab/SegilRaid/Data_Processing/mm9/mm9/mm9.chrom.sizes"
+    blacklist="/home/segil_lab/genomes/mm9-blacklist.bed"
+elif [[ $genome_name == "mm10" ]]; then
+    genome_fa="/media/segil_lab/SegilRaid/Data_Processing/mm10/mm10/mm10_no_alt_analysis_set_ENCODE.fasta"
+    genome_fai="/media/segil_lab/SegilRaid/Data_Processing/mm10/mm10/mm10_no_alt_analysis_set_ENCODE.fasta.fai"
+    chrom_sizes="/media/segil_lab/SegilRaid/Data_Processing/mm10/mm10/mm10.chrom.sizes"
+elif [[ $genome_name == "hg19" ]]; then
+    genome_fa="/media/segil_lab/SegilRaid/staging/Litao/msCentipede/hg19_chr1.fasta"
+    genome_fai=""
+    chrom_sizes=""
+fi
+
+################################################################################
+# <10% of bases within 200bp window of motif center w/ DNase-seq digestion data
+bedtools slop \
+-b 100 \
+-i "$motif_file" \
+-g "$chrom_sizes" | \
+bedtools intersect -wa -u \
+-a - \
+-b "$dnase_file" \
+-f 0.10 > \
+"${tf_name}_occurences.bed"
+
+################################################################################
+# Remove Blacklisted regions
+# convert to pseudo.bed format as shown below:
+    #   > chr1	1001169	1001178	MYC_disc6_USF2	17	+	4.03e-06
+    #   > chr1	1167487	1167497	MYC_disc1_USF2	9.71429	-	2.8e-05
+
+# Reorder the columns and then sort
+if [[ $perform_blacklist == 1 ]]; then
+    grep -e '^chr' "${tf_name}_occurences.bed" | \
+    sort -k1,1V -k2,2n - | \
+    bedtools intersect -nonamecheck -v -a - -b "$blacklist" | \
+    awk 'BEGIN {OFS = "\t"} ; {$7="."; print $1, $2, $3, $7, $5, $4, $6}' | \
+    sort -k1,1V -k2,2n - > \
+    "${tf_name}_candidate_sites.bed"
+else
+    grep -e '^chr' "${tf_name}_occurences.bed" | \
+    awk 'BEGIN {OFS = "\t"} ; {$7="."; print $1, $2, $3, $7, $5, $4, $6}'| \
+    sort -k1,1V -k2,2n - > \
+    "${tf_name}_candidate_sites.bed"
+fi
+
+rm "${tf_name}_occurences.bed"
+
+# ^chr[12]?[0-9]
+
+grep -P "^chr[12]?[0-9]\t" "${tf_name}_candidate_sites.bed" > "${tf_name}_candidate_sites_filtered.bed"
+
+bgzip -c "${tf_name}_candidate_sites_filtered.bed" > \
+"${tf_name}_candidate_sites_filtered.bed.gz"
+
+tabix -p bed "${tf_name}_candidate_sites_filtered.bed.gz"
+
+################################################################################
+#active motif Sites
+bedtools intersect -u \
+-a "${tf_name}_candidate_sites_filtered.bed" \
+-b "${chip_file}" | \
+bedtools sort -i - > \
+"${tf_name}_active_sites.bed"
+
+bgzip -c "${tf_name}_active_sites.bed" > \
+"${tf_name}_active_sites.bed.gz"
+
+tabix -p bed "${tf_name}_active_sites.bed.gz"
+
+################################################################################
+# inactive motif sites
+bedtools intersect -v \
+-a "${tf_name}_candidate_sites_filtered.bed" \
+-b "${chip_file}" | \
+bedtools sort -i - > \
+"${tf_name}_inactive_sites.bed"
+
+bgzip -c "${tf_name}_inactive_sites.bed" > \
+"${tf_name}_inactive_sites.bed.gz"
+
+tabix -p bed "${tf_name}_inactive_sites.bed.gz"
+
+################################################################################
+
+# Split DNase (Chr1 + remaining)
+# /media/segil_lab/SegilRaid/staging/Duc/motifs_defcom/DNase_LoVo_hg38/LoVo_DNase_peak.bed
+
+awk 'BEGIN {OFS = "\t"} ; {$4="."; $5="255"; $6="+"; print $0}' \
+"${dnase_file}" > "dnase_peak_6column.bed"
+
+################################################################################
+# separate chr1 from K562_dnase_merged.bed
+grep -P "chr1\t" "dnase_peak_6column.bed" | \
+sort -k1,1V -k2,2n - | \
+bedtools intersect -wa -u \
+-a - \
+-b "${tf_name}_active_sites.bed" | \
+bedtools bedtobam \
+-i - \
+-g "${genome_fai}" > \
+"ExptA_DNase_peak_columns_${tf_name}.bam"
+
+samtools index \
+"ExptA_DNase_peak_columns_${tf_name}.bam" \
+"ExptA_DNase_peak_columns_${tf_name}.bam.bai"
+
+################################################################################
+# separate the remaining chr
+cat "dnase_peak_6column.bed" | \
+grep -P "^chr[12]?[0-9]" | \
+grep -P -v "chr1\t" |
+sort -k1,1V -k2,2n - | \
+bedtools bedtobam \
+-i - \
+-g "${genome_fai}" > \
+"ExptB_DNase_peak_columns_${tf_name}.bam"
+
+samtools sort "ExptB_DNase_peak_columns_${tf_name}.bam" > "ExptB_DNase_peak_columns_${tf_name}_sorted.bam"
+
+samtools index \
+"ExptB_DNase_peak_columns_${tf_name}_sorted.bam" \
+"ExptB_DNase_peak_columns_${tf_name}_sorted.bam.bai"
+
+################################################################################
+################################################################################
+printf "\
+# The data section specifies the data files to be used with DeFCoM\n
+[data]\n
+# FASTA format genome file (optional)\n
+genome_file = ${genome_fa}\n
+# Active motif sites for training phase\n
+active_sites_file = ${tf_name}_active_sites.bed\n
+# Inactive motif sites for training phase\n
+inactive_sites_file = ${tf_name}_inactive_sites.bed\n
+# Candidate sites for classification phase\n
+candidate_sites_file = ${tf_name}_candidate_sites_filtered.bed\n
+# DNase-seq/ATAC-seq file for training phase\n
+training_bam_file = ExptA_DNase_peak_columns_${tf_name}.bam\n
+# DNase-seq/ATAC-seq file for classification phase\n
+candidate_bam_file = ExptB_DNase_peak_columns_${tf_name}_sorted.bam\n
+# The options section specifies parameter settings for DeFCoM\n
+[options]\n
+# Forward strand 5' end read offset\n
+f_offset = 5\n
+# Reverse strand 5' end read offset\n
+r_offset = 4\n
+# One-sided flanking region size relative to motif site center\n
+flank_size = 100\n
+# Aggregate cuts between strands or keep them separate\n
+combine_strands = True\n
+# Choose whether to use bias correction weights\n
+bias_correction = False\n
+# Number of bootstrap iterations during training phase\n
+bootstrap_iterations = 10\n
+# Number of active sites to use during bootstrapping\n
+bootstrap_active_set_size = 500\n
+# Number of inactive sites to use during bootstrapping\n
+bootstrap_inactive_set_size = 500\n
+# Number of active sites to use during post-bootstrapping model training\n
+training_active_set_size = 3000\n
+# Number of inactive sites to use during post-bootstrapping model training\n
+training_inactive_set_size = 3000\n
+# Cache size (MB) for kernel matrix of SVM\n
+memory_limit = 50000\n
+# Pickle file where trained model data will be stored for use with prediction\n
+model_data_file = trained_model_${tf_name}.pkl\n
+# File containing predictions\n
+results_file = predictions_${tf_name}.bed\n" > "${tf_name}.cfg"
+################################################################################
+
+# train DeFCoM
+python /media/segil_lab/SegilRaid/staging/Duc/defcom/bin/train.py \
+"${tf_name}.cfg"
+
+# use DeFCoM to predict
+python /media/segil_lab/SegilRaid/staging/Duc/defcom/bin/predict.py \
+"${tf_name}.cfg"
+
+
+###############################################################################
+#############################   positive scores   #############################
+# see how many of prediction from ATAC/Dnase shows up in TF Chipseq
+awk '!($8 ~ "-")' "predictions_${tf_name}.bed" > \
+"predictions_${tf_name}_bound.bed"
+# DeFCoM predicted active sites: 852
+printf "Defcom number of bound sites:\n"
+wc -l "predictions_${tf_name}_bound.bed"
+
+printf "Defcom number of correctly called bound:\n"
+bedtools intersect -wa -u \
+-a "predictions_${tf_name}_bound.bed" \
+-b "${tf_name}_active_sites.bed" \
+| wc -l
+
+# DeFCoM predicted active sites: 852
+# number of active sites correctly predicted: 117
+# percentage accuracy (active sites): 117/852 =
+
+#############################################################################
+##########################   top 1000 positive scores  ######################
+# sort score ranking high to low
+printf "Defcom number of correctly bound (top 1000):\n"
+sort -k8,8nr "predictions_${tf_name}_bound.bed" | \
+head -1000 | \
+bedtools intersect -wa -u \
+-a - \
+-b "${tf_name}_active_sites.bed" | \
+wc -l
+
+# Top 1000 DeFCoM predicted active sites
+# Top 1000 DeFCoM predicted active sites overlapping chip: 117
+# percentage accuracy (active sites): =
+
+############################################################################
+#############################  Scores > 2    ##########################
+printf "Defcom number of bound sites (score > 2):\n"
+awk '!($8 ~ /^1/)' "predictions_${tf_name}_bound.bed" | \
+awk '!($8 ~ /^0/)' - | \
+wc -l
+
+printf "Defcom number of correctly bound (score >2):\n"
+awk '!($8 ~ /^1/)' "predictions_${tf_name}_bound.bed" | \
+awk '!($8 ~ /^0/)' - | \
+bedtools intersect -wa -u \
+-a - \
+-b "${tf_name}_active_sites.bed" | \
+wc -l
+
+###########################################################################
